@@ -33,6 +33,7 @@ It uses the [Document Picture-in-Picture API](https://developer.chrome.com/docs/
 ## How it works
 
 - `content.js` finds the board element (`wc-chess-board`), opens a Document PiP window, copies the page's stylesheets across, and moves the board in, leaving a placeholder behind
+- Pointer/mouse move and up events in the PiP window are re-dispatched onto the main document, because chess.com binds its drag-tracking listeners there at init — without this, drags would track the original window's mouse
 - Closing the PiP window fires `pagehide`, which moves the board back into the placeholder's spot
 - `background.js` forwards toolbar-icon clicks to the content script
 

@@ -13,6 +13,54 @@ let pipWindow = null;
 let placeholder = null;
 let board = null;
 
+// Chess.com's board component binds its drag-tracking listeners
+// (pointermove/pointerup) to the page's document at init. Once the board
+// moves to the PiP document those listeners never see PiP events, so drags
+// track the mouse in the original window instead. Re-dispatching clones of
+// the PiP window's events onto the main document fixes that; coordinates
+// stay in PiP client space, which matches the board's bounding rect there.
+// pointerdown is NOT forwarded — the element-level handler moved with the
+// board and already fires, so forwarding it would double the pickup.
+const FORWARDED_EVENTS = [
+  "pointermove",
+  "pointerup",
+  "pointercancel",
+  "mousemove",
+  "mouseup",
+];
+
+function startEventForwarding() {
+  const forward = (event) => {
+    const Ctor = typeof event.pointerId === "number" ? PointerEvent : MouseEvent;
+    document.dispatchEvent(
+      new Ctor(event.type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        detail: event.detail,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        button: event.button,
+        buttons: event.buttons,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        isPrimary: event.isPrimary,
+        pressure: event.pressure,
+      })
+    );
+  };
+  for (const type of FORWARDED_EVENTS) {
+    pipWindow.addEventListener(type, forward, true);
+  }
+}
+
 function findBoard() {
   for (const selector of BOARD_SELECTORS) {
     const el = document.querySelector(selector);
@@ -72,6 +120,7 @@ async function openPip() {
   board.style.height = "100vmin";
   pipBody.appendChild(board);
 
+  startEventForwarding();
   pipWindow.addEventListener("pagehide", restoreBoard, { once: true });
 }
 
