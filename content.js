@@ -13,6 +13,7 @@ let pipWindow = null;
 let placeholder = null;
 let board = null;
 let clockObservers = [];
+let clockPoll = null;
 
 // Extension-injected CSS (content.css) is a user stylesheet and never shows
 // up in document.styleSheets, so copyStyles() can't carry it across — the
@@ -32,8 +33,15 @@ const PIP_STYLES = `
   }
   .chesspip-clock.chesspip-has-clock { display: flex; }
   .chesspip-clock.chesspip-active { background: #5d9948; color: #fff; }
-  .chesspip-stage { flex: 1 1 0; min-height: 0; display: grid; place-items: center; overflow: hidden; }
-  .chesspip-board-box { transform-origin: center; }
+  .chesspip-stage {
+    flex: 1 1 0;
+    min-height: 0;
+    container-type: size;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+  .chesspip-stage > * { width: 100cqmin !important; height: 100cqmin !important; }
 `;
 
 // Chess.com's board component binds its drag-tracking listeners
@@ -138,11 +146,6 @@ async function openPip() {
   bottomClock.className = "chesspip-clock";
   const stage = doc.createElement("div");
   stage.className = "chesspip-stage";
-  const boardBox = doc.createElement("div");
-  boardBox.className = "chesspip-board-box";
-  boardBox.style.width = `${rect.width}px`;
-  boardBox.style.height = `${rect.height}px`;
-  stage.appendChild(boardBox);
   doc.body.append(topClock, stage, bottomClock);
 
   placeholder = document.createElement("div");
@@ -152,24 +155,15 @@ async function openPip() {
   placeholder.textContent = "Board is in Picture-in-Picture";
   board.replaceWith(placeholder);
 
-  // The board keeps its original pixel size (chess.com's JS manages it);
-  // the wrapper is scaled as one unit so pieces, highlights and drag math
-  // all stay consistent at any PiP size.
-  board.style.width = "100%";
-  board.style.height = "100%";
-  boardBox.appendChild(board);
+  // The stage is a CSS size container and the board is sized 100cqmin
+  // !important (see PIP_STYLES): the layout engine rescales the board on
+  // every PiP resize, with nothing for chess.com's own styles to override.
+  // The board's internals are percentage-based, so pieces and highlights
+  // scale with the element, and drag math stays consistent because the
+  // bounding rect matches what's painted.
+  stage.appendChild(board);
 
-  const fitBoard = () => {
-    const scale = Math.min(
-      stage.clientWidth / rect.width,
-      stage.clientHeight / rect.height
-    );
-    boardBox.style.transform = `scale(${scale})`;
-  };
-  fitBoard();
-  pipWindow.addEventListener("resize", fitBoard);
-
-  mirrorClocks(topClock, bottomClock);
+  startClockMirrors(topClock, bottomClock);
 
   startEventForwarding();
   // Tell page-hooks.js (MAIN world) to keep the throttled tab rendering.
@@ -177,51 +171,89 @@ async function openPip() {
   pipWindow.addEventListener("pagehide", restoreBoard, { once: true });
 }
 
-// Mirrors the page's clock elements into the PiP clock bars. The live
-// clocks stay where they are (moving them would break chess.com's layout);
-// a MutationObserver keeps each mirror's text and active state in sync.
-function mirrorClocks(topMirror, bottomMirror) {
-  const clocks = [...document.querySelectorAll(".clock-component")];
-  if (!clocks.length) return;
+const CLOCK_TIME_RE = /^\s*\d{1,3}(:\d{2}){1,2}(\.\d+)?\s*$/;
 
+function findClocks() {
+  let clocks = [...document.querySelectorAll(".clock-component")];
+  if (!clocks.length) {
+    // Fallback for when chess.com renames its classes: leaf elements whose
+    // entire text is a time, rendered large enough to be a player clock
+    // (move-list timestamps are small).
+    clocks = [...document.querySelectorAll("div, span")].filter(
+      (el) =>
+        !el.childElementCount &&
+        CLOCK_TIME_RE.test(el.textContent) &&
+        el.getClientRects().length &&
+        parseFloat(getComputedStyle(el).fontSize) >= 16
+    );
+  }
+  if (!clocks.length) return null;
+  clocks.sort(
+    (a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top
+  );
+  if (clocks.length === 1) return { top: null, bottom: clocks[0] };
   const top = clocks.find((c) => c.classList.contains("clock-top")) ?? clocks[0];
   const bottom =
     clocks.find((c) => c !== top && c.classList.contains("clock-bottom")) ??
-    clocks.find((c) => c !== top);
+    clocks.findLast((c) => c !== top);
+  return { top, bottom };
+}
 
-  for (const [source, mirror] of [
-    [top, topMirror],
-    [bottom, bottomMirror],
-  ]) {
-    if (!source || !mirror) continue;
-    mirror.classList.add("chesspip-has-clock");
-    const sync = () => {
-      mirror.textContent = source.textContent.replace(/\s+/g, " ").trim();
-      mirror.classList.toggle(
-        "chesspip-active",
-        source.classList.contains("clock-player-turn")
-      );
-    };
-    sync();
-    const observer = new MutationObserver(sync);
-    observer.observe(source, {
-      subtree: true,
-      childList: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ["class"],
-    });
-    clockObservers.push(observer);
-  }
+// Mirrors the page's clock elements into the PiP clock bars. The live
+// clocks stay where they are (moving them would break chess.com's layout);
+// a MutationObserver keeps each mirror's text and active state in sync.
+// Clocks can render after the PiP opens (game not started yet), so keep
+// retrying until they exist.
+function startClockMirrors(topMirror, bottomMirror) {
+  const attach = () => {
+    const found = findClocks();
+    if (!found) return false;
+    for (const [source, mirror] of [
+      [found.top, topMirror],
+      [found.bottom, bottomMirror],
+    ]) {
+      if (!source) continue;
+      const root = source.closest('[class*="clock"]') ?? source;
+      mirror.classList.add("chesspip-has-clock");
+      const sync = () => {
+        mirror.textContent = source.textContent.replace(/\s+/g, " ").trim();
+        mirror.classList.toggle(
+          "chesspip-active",
+          /clock-player-turn|clock-active/.test(root.className)
+        );
+      };
+      sync();
+      const observer = new MutationObserver(sync);
+      observer.observe(root, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ["class"],
+      });
+      clockObservers.push(observer);
+    }
+    return true;
+  };
+
+  if (attach()) return;
+  clockPoll = setInterval(() => {
+    if (attach()) {
+      clearInterval(clockPoll);
+      clockPoll = null;
+    }
+  }, 1000);
 }
 
 function restoreBoard() {
   document.dispatchEvent(new CustomEvent("chesspip-deactivate"));
   clockObservers.forEach((observer) => observer.disconnect());
   clockObservers = [];
+  if (clockPoll) {
+    clearInterval(clockPoll);
+    clockPoll = null;
+  }
   if (board && placeholder) {
-    board.style.width = "";
-    board.style.height = "";
     placeholder.replaceWith(board);
   }
   placeholder = null;
