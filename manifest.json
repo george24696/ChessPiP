@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "ChessPiP",
+  "version": "0.1.0",
+  "description": "Pop the Chess.com board into an always-on-top Picture-in-Picture window.",
+  "minimum_chrome_version": "116",
+  "action": {
+    "default_title": "Toggle Chess.com Picture-in-Picture"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.chess.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ]
+}
