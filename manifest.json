@@ -13,6 +13,12 @@
   "content_scripts": [
     {
       "matches": ["https://www.chess.com/*"],
+      "js": ["page-hooks.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.chess.com/*"],
       "js": ["content.js"],
       "css": ["content.css"]
     }

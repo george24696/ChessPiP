@@ -121,10 +121,13 @@ async function openPip() {
   pipBody.appendChild(board);
 
   startEventForwarding();
+  // Tell page-hooks.js (MAIN world) to keep the throttled tab rendering.
+  document.dispatchEvent(new CustomEvent("chesspip-activate"));
   pipWindow.addEventListener("pagehide", restoreBoard, { once: true });
 }
 
 function restoreBoard() {
+  document.dispatchEvent(new CustomEvent("chesspip-deactivate"));
   if (board && placeholder) {
     board.style.width = "";
     board.style.height = "";
